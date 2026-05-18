@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -98,10 +97,7 @@ def register(mcp: Any, services: Any) -> None:
     def list_installed_tools() -> list[dict[str, Any]]:
         """List all installed Kali tools."""
 
-        return [
-            {"tool": tool, "installed": bool(shutil.which(tool)), "path": shutil.which(tool)}
-            for tool in KALI_TOOL_BINARIES
-        ]
+        return [services.check_tool(tool) for tool in KALI_TOOL_BINARIES]
 
     @mcp.resource("kali://templates/nuclei")
     def list_nuclei_templates() -> dict[str, Any]:
@@ -134,4 +130,3 @@ def register(mcp: Any, services: Any) -> None:
         for row in reader[-50:]:
             rows.append(row)
         return rows
-

@@ -13,6 +13,7 @@ Use this server only on systems you own or have explicit written authorization t
 - Async subprocess execution with timeouts and process tracking.
 - MCP progress logging for long-running foreground commands.
 - Pollable background jobs for long scans and listeners.
+- On-demand Kali tool resolver: checks WSL PATH first, suggests exact apt/go/pipx install commands, and can install only the tool needed when explicitly confirmed.
 - Scope enforcement from `~/.exnokalimcp/scope.txt`.
 - Confirmation gates for high-risk actions such as sqlmap, hydra, metasploit, wireless deauth, raw shell, and system installs.
 - SQLite result store plus raw output files under `~/exnokalimcp-workspaces`.
@@ -20,22 +21,39 @@ Use this server only on systems you own or have explicit written authorization t
 
 ## Install On Kali WSL
 
+Install the MCP server only. This is the recommended mode if you want ExnoKaliMCP to use whatever already exists in Kali WSL and install extra tools only when needed:
+
 ```bash
 cd /path/to/exnokalimcp
 chmod +x install.sh
-./install.sh
+./install.sh --server-only
 ```
 
-Install only the core runtime and common tools:
+`./install.sh` defaults to the same server-only profile.
+
+Install runtime plus a few safe CLI utilities, but no Go or pipx recon tools:
 
 ```bash
 ./install.sh --minimal
 ```
 
-Reuse an existing Kali toolchain and only install the Python server:
+Install the full Kali/bug bounty toolchain:
+
+```bash
+./install.sh --full
+```
+
+Reuse an existing Kali toolchain and skip apt/go/pipx entirely:
 
 ```bash
 ./install.sh --minimal --skip-apt --skip-go --skip-pipx
+```
+
+Optional on-demand installer helpers:
+
+```bash
+./install.sh --server-only --with-go
+./install.sh --minimal --with-pipx
 ```
 
 The installer creates:
@@ -225,10 +243,40 @@ get_scan_results(workspace="acme", limit=20)
 generate_report(workspace="acme", format="md")
 screenshot_web(url="https://example.com", workspace="acme")
 check_tool_installed(tool_name="nmap")
+resolve_tool(tool_name="nmap")
+resolve_tool(tool_name="ffuf", install_if_missing=true, confirm_authorized=true)
+tool_inventory(category="web", only_missing=true)
+suggest_tool_for_task(task="directory fuzzing for a web app", target_type="url")
 server_health()
 tool_manifest()
 shell_exec(command="id && uname -a", confirm_authorized=true)
 ```
+
+### On-Demand Tool Resolver
+
+ExnoKaliMCP does not need every Kali tool installed up front. Before a command runs, the server checks the executable from inside the Kali WSL PATH, including `~/.local/bin` and `~/go/bin`. If the binary is missing, the MCP response includes resolver metadata and a copyable install hint.
+
+Use these tools to keep Kali lightweight:
+
+```text
+resolve_tool(tool_name="subfinder")
+resolve_tool(tool_name="subfinder", install_if_missing=true, method="auto", confirm_authorized=true)
+install_tool(tool_name="httpx", method="auto", confirm_authorized=true)
+tool_inventory(category="recon", only_missing=true)
+suggest_tool_for_task(task="subdomain enumeration and http probing")
+doctor_check()
+```
+
+Runtime auto-install is disabled by default. To allow confirmed tool calls to install missing dependencies automatically, set this in `~/.exnokalimcp/config.yaml`:
+
+```yaml
+tool_resolver:
+  enabled: true
+  auto_install: true
+  install_method: "auto"
+```
+
+Even with `auto_install: true`, installation only runs for calls that include `confirm_authorized=true`.
 
 ### Kali Linux File And System Control
 
@@ -343,6 +391,8 @@ Important fields:
 - `paths.workspace_dir`: raw output and reports
 - `paths.results_db`: SQLite result database
 - `tools.default_timeout`: default command timeout
+- `tool_resolver.auto_install`: disabled by default; if enabled, missing tools install only on confirmed calls
+- `tool_resolver.extra_paths`: extra WSL PATH entries such as `~/.local/bin` and `~/go/bin`
 
 ## Troubleshooting
 
@@ -363,7 +413,8 @@ Tool missing:
 
 ```text
 check_tool_installed(tool_name="nmap")
-install_tool(tool_name="nmap", method="apt", confirm_authorized=true)
+resolve_tool(tool_name="nmap")
+install_tool(tool_name="nmap", method="auto", confirm_authorized=true)
 ```
 
 Claude cannot start WSL server:

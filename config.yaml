@@ -114,6 +114,19 @@ tools:
       - "high"
       - "medium"
 
+tool_resolver:
+  enabled: true
+  # Default false: the MCP checks WSL PATH and returns exact install guidance.
+  # Set true only if you want missing tools installed at runtime, and only
+  # calls with confirm_authorized=true may trigger installation.
+  auto_install: false
+  install_method: "auto"  # auto, apt, go, pipx, pip
+  install_timeout: 7200
+  extra_paths:
+    - "~/.local/bin"
+    - "~/go/bin"
+  package_overrides: {}
+
 api_keys:
   shodan: ""
   virustotal: ""

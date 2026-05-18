@@ -741,27 +741,26 @@ def register(mcp: Any, services: Any) -> None:
         return {"ok": True, "input": path, "direction": direction, "converted": converted}
 
     @mcp.tool()
-    async def install_tool(
+    async def resolve_tool(
         tool_name: str,
-        method: str = "apt",
+        install_if_missing: bool = False,
+        method: str = "auto",
         workspace: str = "default",
         timeout: int = 7200,
         confirm_authorized: bool = False,
     ) -> dict[str, Any]:
-        """Install a missing tool using apt, pipx, pip, or go after confirmation."""
+        """Resolve a Kali tool from WSL PATH and optionally install it on demand."""
 
-        method = method.lower()
-        if method == "apt":
-            command = f"sudo apt-get update && sudo apt-get install -y {quote(tool_name)}"
-        elif method == "pipx":
-            command = f"pipx install {quote(tool_name)}"
-        elif method == "pip":
-            command = f"python3 -m pip install --user {quote(tool_name)}"
-        elif method == "go":
-            command = f"go install {quote(tool_name)}"
-        else:
-            raise ValueError("method must be apt, pipx, pip, or go")
-        return await services.run_command_tool(
+        services.ensure_allowed("resolve_tool", locals(), confirm_authorized=confirm_authorized)
+        info = services.tool_resolver.check(tool_name)
+        if info["installed"] or not install_if_missing:
+            return {"ok": True, "tool": info, "installed": info["installed"], "installed_now": False}
+        if not confirm_authorized:
+            raise PermissionError("install_if_missing requires confirm_authorized=True")
+        command = services.tool_resolver.install_command(tool_name, method)
+        if not command:
+            raise ValueError(f"No install command is known for {tool_name!r} with method {method!r}")
+        result = await services.run_command_tool(
             "install_tool",
             command,
             locals(),
@@ -770,6 +769,57 @@ def register(mcp: Any, services: Any) -> None:
             confirm_authorized=confirm_authorized,
             check_binary=False,
         )
+        result["tool"] = services.tool_resolver.check(tool_name)
+        result["installed_now"] = result["tool"]["installed"]
+        return result
+
+    @mcp.tool()
+    async def tool_inventory(category: str = "", only_missing: bool = False) -> dict[str, Any]:
+        """List known Kali tools with installed/missing status and install guidance."""
+
+        services.ensure_allowed("tool_inventory", locals())
+        return {
+            "ok": True,
+            "category": category or "all",
+            "only_missing": only_missing,
+            "tools": services.tool_resolver.inventory(category=category, only_missing=only_missing),
+        }
+
+    @mcp.tool()
+    async def suggest_tool_for_task(task: str, target_type: str = "") -> dict[str, Any]:
+        """Suggest Kali tools for a task and show whether each one exists in WSL."""
+
+        services.ensure_allowed("suggest_tool_for_task", locals())
+        return {"ok": True, **services.tool_resolver.suggest(task, target_type=target_type)}
+
+    @mcp.tool()
+    async def install_tool(
+        tool_name: str,
+        method: str = "auto",
+        workspace: str = "default",
+        timeout: int = 7200,
+        confirm_authorized: bool = False,
+    ) -> dict[str, Any]:
+        """Install a missing Kali tool using resolver metadata after confirmation."""
+
+        method = method.lower()
+        if method not in {"auto", "apt", "pipx", "pip", "go"}:
+            raise ValueError("method must be auto, apt, pipx, pip, or go")
+        command = services.tool_resolver.install_command(tool_name, method)
+        if not command:
+            raise ValueError(f"No install command is known for {tool_name!r} with method {method!r}")
+        result = await services.run_command_tool(
+            "install_tool",
+            command,
+            locals(),
+            workspace=workspace,
+            timeout=timeout,
+            confirm_authorized=confirm_authorized,
+            check_binary=False,
+        )
+        result["tool"] = services.tool_resolver.check(tool_name)
+        result["resolver"] = services.tool_resolver.resolve(tool_name)
+        return result
 
     @mcp.tool()
     async def update_tools(
@@ -808,7 +858,8 @@ def register(mcp: Any, services: Any) -> None:
         """Run ExnoKaliMCP runtime, Kali tool, WSL, and path diagnostics."""
 
         services.ensure_allowed("doctor_check", locals())
-        tools = ["python3", "nmap", "ffuf", "nuclei", "sqlmap", "subfinder", "httpx", "dnsx", "go", "pipx"]
+        runtime_tools = ["python3", "git", "curl"]
+        commonly_used_tools = ["nmap", "ffuf", "nuclei", "sqlmap", "subfinder", "httpx", "dnsx", "go", "pipx"]
         paths = {
             "workspace_dir": services.sessions.workspace_dir,
             "scope_file": services.sessions.scope_file,
@@ -823,7 +874,9 @@ def register(mcp: Any, services: Any) -> None:
             "platform": platform.platform(),
             "python": platform.python_version(),
             "is_wsl": "microsoft" in platform.release().lower() or bool(os.environ.get("WSL_DISTRO_NAME")),
-            "tools": {tool: services.check_tool(tool) for tool in tools},
+            "runtime_tools": {tool: services.check_tool(tool) for tool in runtime_tools},
+            "optional_tools": {tool: services.check_tool(tool) for tool in commonly_used_tools},
+            "tool_resolver": services.config.get("tool_resolver", {}),
             "paths": {
                 name: {
                     "path": str(path),
@@ -836,13 +889,14 @@ def register(mcp: Any, services: Any) -> None:
             "scope_rules": services.sessions.list_scope(),
         }
         issues = []
-        for tool, info in checks["tools"].items():
-            if tool in {"nmap", "ffuf", "sqlmap"} and not info["installed"]:
-                issues.append(f"missing core tool: {tool}")
+        for tool, info in checks["runtime_tools"].items():
+            if not info["installed"]:
+                issues.append(f"missing runtime tool: {tool}")
         for name, info in checks["paths"].items():
             if name in {"workspace_dir", "scope_file", "results_db", "audit_file"} and not info["writable"]:
                 issues.append(f"path is not writable: {name}")
-        return {"ok": not issues, "issues": issues, "checks": checks}
+        optional_missing = [tool for tool, info in checks["optional_tools"].items() if not info["installed"]]
+        return {"ok": not issues, "issues": issues, "optional_missing": optional_missing, "checks": checks}
 
     @mcp.tool()
     async def doctor_fix(
@@ -862,7 +916,7 @@ def register(mcp: Any, services: Any) -> None:
             services.audit_file.parent.mkdir(parents=True, exist_ok=True)
             return {"ok": True, "action": action}
         if action == "install_minimal":
-            command = "sudo apt-get update && sudo apt-get install -y python3 python3-venv python3-pip nmap ffuf sqlmap nuclei seclists"
+            command = "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv python3-pip git curl wget jq unzip"
         elif action == "update_nuclei_templates":
             command = "nuclei -update-templates"
         else:

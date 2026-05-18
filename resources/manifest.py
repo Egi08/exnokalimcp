@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +43,6 @@ def register(mcp: Any, services: Any) -> None:
             "results_db": str(services.store.db_path),
             "audit_log": str(Path(services.audit_file).expanduser()),
             "scope_rules": services.sessions.list_scope(),
-            "core_tools": {tool: bool(shutil.which(tool)) for tool in core_tools},
+            "core_tools": {tool: services.check_tool(tool) for tool in core_tools},
+            "tool_resolver": services.config.get("tool_resolver", {}),
         }
-

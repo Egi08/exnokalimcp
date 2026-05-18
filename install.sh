@@ -7,38 +7,62 @@ CONFIG_PATH="${APP_DIR}/config.yaml"
 VENV_DIR="${APP_DIR}/venv"
 SERVER_PATH="${PROJECT_DIR}/server.py"
 KEY_FILE="${APP_DIR}/auth_key"
-PROFILE="full"
+PROFILE="server-only"
 SKIP_APT=0
-SKIP_GO=0
-SKIP_PIPX=0
+GO_MODE="auto"
+PIPX_MODE="auto"
 
 log() { printf '[exnokalimcp] %s\n' "$*"; }
 warn() { printf '[exnokalimcp][warn] %s\n' "$*" >&2; }
 
 usage() {
   cat <<'EOF'
-Usage: ./install.sh [--minimal|--full] [--skip-apt] [--skip-go] [--skip-pipx]
+Usage: ./install.sh [--server-only|--minimal|--full] [--skip-apt] [--with-go|--skip-go] [--with-pipx|--skip-pipx]
 
-  --minimal   Install only Python runtime and core CLI tools.
-  --full      Install the full Kali/bug bounty toolchain. Default.
-  --skip-apt  Do not install apt packages.
-  --skip-go   Do not install Go tools.
-  --skip-pipx Do not install pipx CLI tools.
+  --server-only Install only the MCP Python runtime and WSL integration. Default.
+  --minimal     Install runtime plus a few safe CLI utilities. No Go/pipx tools by default.
+  --full        Install the full Kali/bug bounty toolchain.
+  --skip-apt    Do not install apt packages.
+  --with-go     Install Go-based tools for the selected profile.
+  --skip-go     Do not install Go tools.
+  --with-pipx   Install pipx-based tools for the selected profile.
+  --skip-pipx   Do not install pipx CLI tools.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --server-only) PROFILE="server-only" ;;
     --minimal) PROFILE="minimal" ;;
     --full) PROFILE="full" ;;
     --skip-apt) SKIP_APT=1 ;;
-    --skip-go) SKIP_GO=1 ;;
-    --skip-pipx) SKIP_PIPX=1 ;;
+    --with-go) GO_MODE="yes" ;;
+    --skip-go) GO_MODE="no" ;;
+    --with-pipx) PIPX_MODE="yes" ;;
+    --skip-pipx) PIPX_MODE="no" ;;
     -h|--help) usage; exit 0 ;;
     *) warn "Unknown option: $1"; usage; exit 2 ;;
   esac
   shift
 done
+
+if [[ "${GO_MODE}" == "auto" ]]; then
+  if [[ "${PROFILE}" == "full" ]]; then SKIP_GO=0; else SKIP_GO=1; fi
+elif [[ "${GO_MODE}" == "yes" ]]; then
+  SKIP_GO=0
+else
+  SKIP_GO=1
+fi
+
+if [[ "${PIPX_MODE}" == "auto" ]]; then
+  if [[ "${PROFILE}" == "full" ]]; then SKIP_PIPX=0; else SKIP_PIPX=1; fi
+elif [[ "${PIPX_MODE}" == "yes" ]]; then
+  SKIP_PIPX=0
+else
+  SKIP_PIPX=1
+fi
+
+log "Install profile: ${PROFILE} (apt=$((1-SKIP_APT)), go=$((1-SKIP_GO)), pipx=$((1-SKIP_PIPX)))"
 
 if ! grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
   warn "This installer is optimized for Kali on WSL. Continuing anyway."
@@ -69,10 +93,13 @@ FULL_APT_TOOLS=(
   theharvester recon-ng sherlock
 )
 
+SERVER_APT_TOOLS=(
+  python3 python3-pip python3-venv git curl wget jq unzip ca-certificates
+)
+
 MINIMAL_APT_TOOLS=(
-  python3 python3-pip python3-venv pipx git curl wget jq unzip
-  nmap whois dnsutils netcat-openbsd ffuf gobuster sqlmap nuclei
-  tcpdump seclists wordlists
+  "${SERVER_APT_TOOLS[@]}"
+  whois dnsutils netcat-openbsd tcpdump
 )
 
 install_apt() {
@@ -89,10 +116,18 @@ install_apt() {
 if [[ "${SKIP_APT}" -eq 0 ]]; then
   log "Updating apt package index"
   sudo apt-get update
-  if [[ "${PROFILE}" == "minimal" ]]; then
+  if [[ "${PROFILE}" == "server-only" ]]; then
+    APT_TOOLS=("${SERVER_APT_TOOLS[@]}")
+  elif [[ "${PROFILE}" == "minimal" ]]; then
     APT_TOOLS=("${MINIMAL_APT_TOOLS[@]}")
   else
     APT_TOOLS=("${FULL_APT_TOOLS[@]}")
+  fi
+  if [[ "${SKIP_GO}" -eq 0 ]]; then
+    APT_TOOLS+=(golang-go)
+  fi
+  if [[ "${SKIP_PIPX}" -eq 0 ]]; then
+    APT_TOOLS+=(pipx)
   fi
   for pkg in "${APT_TOOLS[@]}"; do
     install_apt "$pkg"

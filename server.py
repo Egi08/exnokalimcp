@@ -9,10 +9,7 @@ import importlib
 import json
 import os
 import re
-import shutil
-import shlex
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -26,6 +23,7 @@ from tools import DISCLAIMER, command_preview, quote
 from tools.executor import configure_executor, run_command_collect, start_background_command
 from tools.result_store import ResultStore
 from tools.session_manager import SessionManager
+from tools.tool_resolver import ToolResolver
 
 
 TOOL_MODULES = [
@@ -98,6 +96,8 @@ class ExnoKaliMCPServices:
         self.sessions = SessionManager(config)
         db_path = config.get("paths", {}).get("results_db", "~/.exnokalimcp/results.db")
         self.store = ResultStore(db_path)
+        self.tool_resolver = ToolResolver(config)
+        self.tool_resolver.apply_path()
         logs_dir = Path(config.get("paths", {}).get("logs_dir", "~/.exnokalimcp/logs")).expanduser()
         logs_dir.mkdir(parents=True, exist_ok=True)
         self.audit_file = logs_dir / "audit.log"
@@ -259,16 +259,11 @@ class ExnoKaliMCPServices:
         self.ensure_command_policy(tool, command, confirm_authorized=confirm_authorized)
         missing = self._missing_tool(command) if check_binary else None
         if missing:
-            result = {
-                "ok": False,
-                "status": "missing_tool",
-                "tool": tool,
-                "missing": missing,
-                "install_hint": f"Run install_tool(tool_name='{missing}', method='apt') or install.sh.",
-                "disclaimer": DISCLAIMER,
-            }
-            self.audit_log(tool, params, status="missing_tool", message=missing)
-            return result
+            install_attempt = await self._maybe_auto_install_tool(missing, tool, params, confirm_authorized)
+            if not install_attempt or not install_attempt.get("installed_after"):
+                result = self._missing_tool_response(tool, missing, install_attempt)
+                self.audit_log(tool, params, status="missing_tool", message=missing)
+                return result
 
         output_path = self.sessions.output_path(workspace, tool)
         self.audit_log(tool, params, status="started", message=command_preview(command))
@@ -362,14 +357,9 @@ class ExnoKaliMCPServices:
         self.ensure_command_policy(tool, command, confirm_authorized=confirm_authorized)
         missing = self._missing_tool(command)
         if missing:
-            return {
-                "ok": False,
-                "status": "missing_tool",
-                "tool": tool,
-                "missing": missing,
-                "install_hint": f"Run install_tool(tool_name='{missing}', method='apt') or install.sh.",
-                "disclaimer": DISCLAIMER,
-            }
+            install_attempt = await self._maybe_auto_install_tool(missing, tool, params, confirm_authorized)
+            if not install_attempt or not install_attempt.get("installed_after"):
+                return self._missing_tool_response(tool, missing, install_attempt)
         output_path = self.sessions.output_path(workspace, tool)
         self.audit_log(tool, params, status="background_started", message=command_preview(command))
         job = await start_background_command(command, str(output_path), cwd=cwd, env=env)
@@ -403,42 +393,63 @@ class ExnoKaliMCPServices:
     def check_tool(self, tool_name: str) -> dict[str, Any]:
         """Return availability information for an executable."""
 
-        path = shutil.which(tool_name)
-        version = ""
-        if path:
-            try:
-                proc = subprocess.run(
-                    [tool_name, "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    check=False,
-                )
-                version = (proc.stdout or proc.stderr).splitlines()[0:1]
-                version = version[0] if version else ""
-            except Exception:
-                version = ""
-        return {"tool": tool_name, "installed": bool(path), "path": path, "version": version}
+        return self.tool_resolver.check(tool_name)
 
     def _missing_tool(self, command: str) -> str | None:
-        try:
-            head = command.split("|", 1)[0].split("&&", 1)[0].strip()
-            tokens = shlex.split(head)
-            if not tokens:
-                return None
-            executable = tokens[0]
-            if executable in {"sudo", "timeout"} and len(tokens) > 1:
-                if executable == "sudo":
-                    executable = tokens[1]
-                elif len(tokens) > 2:
-                    executable = tokens[2]
-            if executable.startswith(("python", "bash", "sh")):
-                return None if shutil.which(executable) else executable
-            if "/" in executable:
-                return None if Path(executable).exists() else executable
-            return None if shutil.which(executable) else executable
-        except Exception:
+        return self.tool_resolver.missing_from_command(command)
+
+    async def _maybe_auto_install_tool(
+        self,
+        missing: str,
+        parent_tool: str,
+        params: dict[str, Any],
+        confirm_authorized: bool,
+    ) -> dict[str, Any] | None:
+        """Optionally install a missing dependency before executing a tool."""
+
+        if not self.tool_resolver.auto_install or not confirm_authorized:
             return None
+        command = self.tool_resolver.install_command(missing, self.tool_resolver.default_method)
+        if not command:
+            return None
+        self.audit_log(parent_tool, params, status="auto_install_started", message=f"{missing}: {command}")
+        result = await run_command_collect(command, timeout=self.tool_resolver.install_timeout)
+        installed_after = self.tool_resolver.check(missing)["installed"]
+        status = "auto_installed" if installed_after else "auto_install_failed"
+        self.audit_log(parent_tool, params, status=status, message=f"{missing}: exit_code={result.exit_code}")
+        return {
+            "tool": missing,
+            "command": command,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "installed_after": installed_after,
+            "output_preview": result.output[: int(self.config.get("security", {}).get("max_output_chars", 20000))],
+        }
+
+    def _missing_tool_response(
+        self,
+        tool: str,
+        missing: str,
+        install_attempt: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build a structured missing-tool response with resolver guidance."""
+
+        resolver = self.tool_resolver.resolve(missing)
+        method = resolver.get("recommended_method", "auto")
+        return {
+            "ok": False,
+            "status": "missing_tool",
+            "tool": tool,
+            "missing": missing,
+            "resolver": resolver,
+            "install_attempt": install_attempt,
+            "install_hint": (
+                f"Run resolve_tool(tool_name='{missing}', install_if_missing=True, "
+                f"method='{method}', confirm_authorized=True) or install_tool(tool_name='{missing}', "
+                f"method='{method}', confirm_authorized=True)."
+            ),
+            "disclaimer": DISCLAIMER,
+        }
 
     def _rate_limit(self, tool: str, target: str) -> None:
         limits = self.config.get("security", {}).get("rate_limits", {})
