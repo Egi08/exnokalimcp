@@ -35,6 +35,7 @@ def test_mcp_registers_terminal_file_and_doctor_tools(tmp_path) -> None:
         "workspace_tree",
         "workspace_file_read",
         "workspace_export_zip",
+        "screenshot_desktop",
         "wsl_path_convert",
         "doctor_check",
         "doctor_fix",

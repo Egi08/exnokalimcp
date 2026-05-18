@@ -241,6 +241,7 @@ list_workspaces()
 get_scan_results(workspace="acme", limit=20)
 generate_report(workspace="acme", format="md")
 screenshot_web(url="https://example.com", workspace="acme")
+screenshot_desktop(mode="auto", active_window=true, workspace="acme", confirm_authorized=true)
 check_tool_installed(tool_name="nmap")
 resolve_tool(tool_name="nmap")
 resolve_tool(tool_name="ffuf", install_if_missing=true, confirm_authorized=true)
@@ -337,6 +338,16 @@ workspace_tree(workspace="default")
 workspace_file_read(workspace="default", relative_path="raw/output.txt")
 workspace_export_zip(workspace="default", confirm_authorized=true)
 ```
+
+Desktop screenshots from Kali WSL:
+
+```text
+screenshot_desktop(mode="auto", active_window=false, confirm_authorized=true)
+screenshot_desktop(mode="windows", active_window=true, include_base64=true, confirm_authorized=true)
+screenshot_desktop(output="/home/kali/screen.png", mode="linux", confirm_authorized=true)
+```
+
+`mode=auto` tries Linux GUI screenshot tools first when WSLg/X11 is available, then falls back to Windows PowerShell capture through WSL interop. `active_window=true` captures the current foreground Windows window, which is useful for Kali terminal screenshots.
 
 Kali doctor, command replay, and system aliases:
 

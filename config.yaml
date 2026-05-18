@@ -73,6 +73,7 @@ security:
     - "file_patch"
     - "file_restore"
     - "workspace_export_zip"
+    - "screenshot_desktop"
     - "doctor_fix"
     - "rerun_command"
     - "save_command_as_script"

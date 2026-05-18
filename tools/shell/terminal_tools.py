@@ -141,6 +141,131 @@ def _wsl_to_windows(path: str) -> str:
     return path
 
 
+def _png_dimensions(path: Path) -> dict[str, int]:
+    """Read PNG width and height without adding an image dependency."""
+
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(24)
+        if len(header) >= 24 and header[:8] == b"\x89PNG\r\n\x1a\n":
+            return {
+                "width": int.from_bytes(header[16:20], "big"),
+                "height": int.from_bytes(header[20:24], "big"),
+            }
+    except OSError:
+        pass
+    return {"width": 0, "height": 0}
+
+
+def _powershell_screenshot_script() -> str:
+    """Return a PowerShell screen capture script for WSL interop."""
+
+    return r'''
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$out = $env:EXNOKALIMCP_SCREENSHOT_OUT
+$delayMs = 0
+[int]::TryParse($env:EXNOKALIMCP_SCREENSHOT_DELAY_MS, [ref]$delayMs) | Out-Null
+if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
+$active = ($env:EXNOKALIMCP_SCREENSHOT_ACTIVE -eq "true")
+
+function Use-VirtualScreen {
+  $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+  return @($bounds.X, $bounds.Y, $bounds.Width, $bounds.Height)
+}
+
+$coords = $null
+if ($active) {
+  $code = @"
+using System;
+using System.Runtime.InteropServices;
+public struct EXNORECT { public int Left; public int Top; public int Right; public int Bottom; }
+public class EXNOWIN32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out EXNORECT rect);
+}
+"@
+  Add-Type $code -ErrorAction SilentlyContinue | Out-Null
+  $rect = New-Object EXNORECT
+  $hwnd = [EXNOWIN32]::GetForegroundWindow()
+  [EXNOWIN32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+  $w = $rect.Right - $rect.Left
+  $h = $rect.Bottom - $rect.Top
+  if ($w -gt 0 -and $h -gt 0) {
+    $coords = @($rect.Left, $rect.Top, $w, $h)
+  }
+}
+if ($null -eq $coords) { $coords = Use-VirtualScreen }
+
+$x = [int]$coords[0]
+$y = [int]$coords[1]
+$w = [int]$coords[2]
+$h = [int]$coords[3]
+$dir = [System.IO.Path]::GetDirectoryName($out)
+if ($dir) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }
+$bitmap = New-Object System.Drawing.Bitmap $w, $h
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($x, $y, 0, 0, $bitmap.Size)
+$bitmap.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+(@{ok=$true; backend="windows"; output=$out; width=$w; height=$h; active_window=$active} | ConvertTo-Json -Compress)
+'''
+
+
+def _linux_screenshot_shell() -> str:
+    """Return a POSIX shell fragment that tries common Linux screenshot tools."""
+
+    return """
+if command -v grim >/dev/null 2>&1; then
+  grim "$OUT"
+elif command -v gnome-screenshot >/dev/null 2>&1; then
+  gnome-screenshot -f "$OUT"
+elif command -v spectacle >/dev/null 2>&1; then
+  spectacle -b -n -o "$OUT"
+elif command -v scrot >/dev/null 2>&1; then
+  scrot "$OUT"
+elif command -v maim >/dev/null 2>&1; then
+  maim "$OUT"
+elif command -v import >/dev/null 2>&1; then
+  import -window root "$OUT"
+else
+  echo "No Linux screenshot tool found. Try mode=windows on WSL, or install grim/gnome-screenshot/scrot/maim." >&2
+  false
+fi
+"""
+
+
+def _desktop_screenshot_command(output_path: Path, mode: str, active_window: bool, delay_seconds: float) -> str:
+    """Build the shell command used by screenshot_desktop."""
+
+    delay_ms = max(0, int(float(delay_seconds) * 1000))
+    linux_capture = _linux_screenshot_shell()
+    encoded_ps = base64.b64encode(_powershell_screenshot_script().encode("utf-16le")).decode("ascii")
+    windows_capture = (
+        'OUT_WIN=$(wslpath -w "$OUT") && '
+        'EXNOKALIMCP_SCREENSHOT_OUT="$OUT_WIN" '
+        f"EXNOKALIMCP_SCREENSHOT_DELAY_MS={delay_ms} "
+        f"EXNOKALIMCP_SCREENSHOT_ACTIVE={quote(str(active_window).lower())} "
+        f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {quote(encoded_ps)}"
+    )
+    output = quote(output_path)
+    if mode == "linux":
+        return f"OUT={output}; export OUT; {linux_capture}"
+    if mode == "windows":
+        return f"OUT={output}; export OUT; {windows_capture}"
+    return (
+        f"OUT={output}; export OUT; "
+        'if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]; then '
+        f"( {linux_capture} ) || true; "
+        "fi; "
+        'if [ -s "$OUT" ]; then printf \'{"ok":true,"backend":"linux","output":"%s"}\\n\' "$OUT"; '
+        "elif command -v powershell.exe >/dev/null 2>&1; then "
+        f"{windows_capture}; "
+        "else echo 'No screenshot backend available. WSL interop or a Linux GUI screenshot tool is required.' >&2; exit 127; fi"
+    )
+
+
 def register(mcp: Any, services: Any) -> None:
     """Register shell and system management tools."""
 
@@ -1370,6 +1495,67 @@ def register(mcp: Any, services: Any) -> None:
                 timeout=timeout,
             )
         raise ValueError("format must be md, html, json, or pdf")
+
+    @mcp.tool()
+    async def screenshot_desktop(
+        output: str = "",
+        mode: str = "auto",
+        active_window: bool = False,
+        delay_seconds: float = 0,
+        workspace: str = "default",
+        timeout: int = 60,
+        include_base64: bool = False,
+        max_inline_bytes: int = 2000000,
+        confirm_authorized: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Capture a Kali WSL desktop screenshot.
+
+        In WSL, mode=auto first tries Linux GUI screenshot tools when DISPLAY or
+        WAYLAND_DISPLAY exists, then falls back to Windows PowerShell screen
+        capture through WSL interop. Use active_window=True to capture only the
+        current foreground Windows window, such as a Kali terminal.
+        """
+
+        services.ensure_allowed("screenshot_desktop", locals(), confirm_authorized=confirm_authorized)
+        mode = mode.lower()
+        if mode not in {"auto", "linux", "windows"}:
+            raise ValueError("mode must be auto, linux, or windows")
+        if output:
+            output_path = _expand(output)
+            services.ensure_path_policy("screenshot_desktop", output_path, write=True)
+        else:
+            output_path = services.sessions.output_path(workspace, "screenshot_desktop", ".png", folder="screenshots")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        command = _desktop_screenshot_command(output_path, mode, active_window, delay_seconds)
+        result = await services.run_command_tool(
+            "screenshot_desktop",
+            command,
+            locals(),
+            workspace=workspace,
+            timeout=timeout,
+            confirm_authorized=confirm_authorized,
+            check_binary=False,
+        )
+        exists = output_path.exists()
+        result.update(
+            {
+                "screenshot_path": str(output_path),
+                "screenshot_exists": exists,
+                "screenshot_size": output_path.stat().st_size if exists else 0,
+                "dimensions": _png_dimensions(output_path) if exists else {"width": 0, "height": 0},
+                "capture_mode": mode,
+                "active_window": active_window,
+            }
+        )
+        if include_base64 and exists:
+            size = output_path.stat().st_size
+            if size <= max(1, int(max_inline_bytes)):
+                result["image_base64"] = base64.b64encode(output_path.read_bytes()).decode("ascii")
+                result["image_mime"] = "image/png"
+            else:
+                result["image_base64_omitted"] = f"file is {size} bytes; max_inline_bytes={max_inline_bytes}"
+        return result
 
     @mcp.tool()
     async def screenshot_web(
