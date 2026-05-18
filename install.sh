@@ -235,13 +235,10 @@ cat > "${CLAUDE_SNIPPET}" <<JSON
         "-d",
         "${DISTRO}",
         "--",
-        "${VENV_DIR}/bin/python",
-        "${SERVER_PATH}"
-      ],
-      "env": {
-        "EXNOKALIMCP_CONFIG": "${CONFIG_PATH}",
-        "EXNOKALIMCP_AUTH_KEY": "${AUTH_KEY}"
-      }
+        "/bin/sh",
+        "-lc",
+        "cd \"${PROJECT_DIR}\" && EXNOKALIMCP_CONFIG=\"${CONFIG_PATH}\" EXNOKALIMCP_AUTH_KEY=\"\$(cat \"${KEY_FILE}\")\" exec \"${VENV_DIR}/bin/python\" \"${SERVER_PATH}\""
+      ]
     }
   }
 }

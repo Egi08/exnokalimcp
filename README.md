@@ -84,17 +84,16 @@ WSL-aware configuration:
         "-d",
         "kali-linux",
         "--",
-        "/home/YOUR_USER/.exnokalimcp/venv/bin/python",
-        "/home/YOUR_USER/path/to/exnokalimcp/server.py"
-      ],
-      "env": {
-        "EXNOKALIMCP_CONFIG": "/home/YOUR_USER/.exnokalimcp/config.yaml",
-        "EXNOKALIMCP_AUTH_KEY": "YOUR_GENERATED_KEY"
-      }
+        "/bin/sh",
+        "-lc",
+        "cd \"/home/YOUR_USER/path/to/exnokalimcp\" && EXNOKALIMCP_CONFIG=\"/home/YOUR_USER/.exnokalimcp/config.yaml\" EXNOKALIMCP_AUTH_KEY=\"$(cat \"/home/YOUR_USER/.exnokalimcp/auth_key\")\" exec \"/home/YOUR_USER/.exnokalimcp/venv/bin/python\" \"/home/YOUR_USER/path/to/exnokalimcp/server.py\""
+      ]
     }
   }
 }
 ```
+
+The WSL config reads the auth key inside Kali because environment variables set on the Windows `wsl.exe` process are not always forwarded into the Linux process by MCP clients.
 
 Native Linux stdio configuration:
 
