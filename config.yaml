@@ -1,0 +1,122 @@
+server:
+  name: "exnokalimcp"
+  version: "1.0.0"
+  transport: "stdio"
+  host: "127.0.0.1"
+  port: 8080
+  auth:
+    enabled: true
+    api_keys:
+      - "change-me-exnokalimcp-key"
+
+security:
+  permission_mode: "full_control"  # read_only, workspace_only, pentest_safe, full_control
+  scope_enforcement: true
+  scope_file: "~/.exnokalimcp/scope.txt"
+  protected_paths:
+    - "/"
+    - "/bin"
+    - "/boot"
+    - "/dev"
+    - "/etc"
+    - "/lib"
+    - "/lib64"
+    - "/proc"
+    - "/root"
+    - "/sbin"
+    - "/sys"
+    - "/usr"
+    - "/var"
+  dangerous_command_patterns:
+    - "\\brm\\s+-[^\\n]*r[^\\n]*f\\s+/"
+    - "\\bmkfs(\\.|\\s)"
+    - "\\bdd\\b[^\\n]*\\bof=/dev/"
+    - "\\bshutdown\\b"
+    - "\\breboot\\b"
+    - "\\bpoweroff\\b"
+  require_confirmation:
+    - "msfconsole_command"
+    - "msfvenom_payload"
+    - "hydra_brute"
+    - "medusa_brute"
+    - "aireplay_deauth"
+    - "sqlmap_scan"
+    - "sqlmap_dump"
+    - "ssrfmap"
+    - "linux_privesc_check"
+    - "windows_privesc_check"
+    - "pwncat_listen"
+    - "netcat_listen"
+    - "socat_relay"
+    - "proxychains_run"
+    - "packet_crafter"
+    - "wifite_auto"
+    - "airmon_start"
+    - "airodump_capture"
+    - "shell_exec"
+    - "shell_script"
+    - "shell_interactive"
+    - "terminal_start"
+    - "terminal_send"
+    - "terminal_stop"
+    - "start_background_process"
+    - "send_background_process_input"
+    - "stop_background_process"
+    - "file_write"
+    - "file_upload_chunk"
+    - "file_mkdir"
+    - "file_copy"
+    - "file_move"
+    - "file_delete"
+    - "file_replace"
+    - "file_chmod"
+    - "file_patch"
+    - "file_restore"
+    - "workspace_export_zip"
+    - "doctor_fix"
+    - "rerun_command"
+    - "save_command_as_script"
+    - "apt_update"
+    - "install_tool"
+    - "update_tools"
+    - "kill_running_process"
+  sudo_password: ""
+  max_output_chars: 20000
+  rate_limits:
+    default_seconds: 2
+    nmap_scan: 5
+    nuclei_scan: 10
+    hydra_brute: 60
+    medusa_brute: 60
+    aireplay_deauth: 120
+
+paths:
+  workspace_dir: "~/exnokalimcp-workspaces"
+  wordlists_dir: "/usr/share/wordlists"
+  results_db: "~/.exnokalimcp/results.db"
+  logs_dir: "~/.exnokalimcp/logs"
+
+tools:
+  default_timeout: 3600
+  nmap:
+    default_args: "-sV -sC"
+    max_rate: 1000
+  ffuf:
+    default_threads: 50
+    default_wordlist: "/usr/share/wordlists/dirb/common.txt"
+  sqlmap:
+    default_level: 3
+    default_risk: 2
+  nuclei:
+    templates_dir: "~/nuclei-templates"
+    default_severity:
+      - "critical"
+      - "high"
+      - "medium"
+
+api_keys:
+  shodan: ""
+  virustotal: ""
+  censys_id: ""
+  censys_secret: ""
+  hunter_io: ""
