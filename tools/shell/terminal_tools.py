@@ -1517,6 +1517,8 @@ def register(mcp: Any, services: Any) -> None:
         current foreground Windows window, such as a Kali terminal.
         """
 
+        if not confirm_authorized:
+            raise PermissionError("screenshot_desktop requires confirm_authorized=True because it can capture screen contents.")
         services.ensure_allowed("screenshot_desktop", locals(), confirm_authorized=confirm_authorized)
         mode = mode.lower()
         if mode not in {"auto", "linux", "windows"}:
