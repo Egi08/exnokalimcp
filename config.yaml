@@ -6,6 +6,7 @@ server:
   port: 8080
   auth:
     enabled: true
+    key_file: "~/.exnokalimcp/auth_key"
     api_keys:
       - "change-me-exnokalimcp-key"
 

@@ -94,6 +94,7 @@ WSL-aware configuration:
 ```
 
 The WSL config reads the auth key inside Kali because environment variables set on the Windows `wsl.exe` process are not always forwarded into the Linux process by MCP clients.
+The server also falls back to `server.auth.key_file` (`~/.exnokalimcp/auth_key` by default) when the environment variable is missing, which helps stdio clients that launch through `wsl.exe`.
 
 Native Linux stdio configuration:
 
@@ -395,6 +396,7 @@ Important fields:
 
 - `server.transport`: `stdio` or `sse`
 - `server.auth.api_keys`: accepted API keys
+- `server.auth.key_file`: local fallback auth key file for WSL stdio clients
 - `security.scope_enforcement`: blocks network tools outside scope
 - `security.require_confirmation`: tools that need `confirm_authorized=true`
 - `security.permission_mode`: `full_control`, `pentest_safe`, `workspace_only`, or `read_only`

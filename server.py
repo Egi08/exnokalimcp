@@ -110,11 +110,25 @@ class ExnoKaliMCPServices:
         if not auth.get("enabled", True):
             return
         configured = {str(key) for key in auth.get("api_keys", []) if str(key)}
-        supplied = os.environ.get("EXNOKALIMCP_AUTH_KEY") or os.environ.get("KALI_MCP_AUTH_KEY", "")
+        supplied = (
+            os.environ.get("EXNOKALIMCP_AUTH_KEY")
+            or os.environ.get("KALI_MCP_AUTH_KEY", "")
+            or self._auth_key_from_file()
+        )
         if configured and supplied not in configured:
             raise PermissionError(
                 "EXNOKALIMCP_AUTH_KEY is missing or invalid. Set it to an api_keys entry in config.yaml."
             )
+
+    def _auth_key_from_file(self) -> str:
+        """Read the local auth key file as a fallback for WSL stdio clients."""
+
+        auth = self.config.get("server", {}).get("auth", {})
+        key_file = Path(str(auth.get("key_file", "~/.exnokalimcp/auth_key"))).expanduser()
+        try:
+            return key_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
 
     def ensure_allowed(
         self,
