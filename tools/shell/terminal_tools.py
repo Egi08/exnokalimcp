@@ -41,6 +41,19 @@ def _expand(path: str) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def _redacted_server_config(config: dict[str, Any]) -> dict[str, Any]:
+    server = dict(config.get("server", {}))
+    if isinstance(server.get("auth"), dict):
+        auth = dict(server["auth"])
+        keys = auth.get("api_keys")
+        if isinstance(keys, list):
+            auth["api_keys"] = ["***REDACTED***"] * len(keys)
+        elif keys:
+            auth["api_keys"] = "***REDACTED***"
+        server["auth"] = auth
+    return server
+
+
 def _is_hidden(path: Path) -> bool:
     return any(part.startswith(".") for part in path.parts if part not in {".", ".."})
 
@@ -157,26 +170,43 @@ def _png_dimensions(path: Path) -> dict[str, int]:
     return {"width": 0, "height": 0}
 
 
-def _powershell_screenshot_script() -> str:
+def _powershell_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _wsl_windows_path(path: Path) -> str:
+    raw = str(path).replace("\\", "/")
+    drive_match = re.match(r"^/mnt/([a-zA-Z])(?:/(.*))?$", raw)
+    if drive_match:
+        drive = drive_match.group(1).upper()
+        rest = (drive_match.group(2) or "").replace("/", "\\")
+        return f"{drive}:\\{rest}" if rest else f"{drive}:\\"
+    distro = os.environ.get("WSL_DISTRO_NAME", "kali-linux")
+    return "\\\\wsl.localhost\\" + distro + raw.replace("/", "\\")
+
+
+def _powershell_screenshot_script(output_path: str, active_window: bool, delay_ms: int) -> str:
     """Return a PowerShell screen capture script for WSL interop."""
 
-    return r'''
+    active_literal = "$true" if active_window else "$false"
+    script = r'''
+$ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$out = $env:EXNOKALIMCP_SCREENSHOT_OUT
-$delayMs = 0
-[int]::TryParse($env:EXNOKALIMCP_SCREENSHOT_DELAY_MS, [ref]$delayMs) | Out-Null
+$out = __OUTPUT_PATH__
+$delayMs = __DELAY_MS__
 if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
-$active = ($env:EXNOKALIMCP_SCREENSHOT_ACTIVE -eq "true")
+$active = __ACTIVE_WINDOW__
 
 function Use-VirtualScreen {
   $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
   return @($bounds.X, $bounds.Y, $bounds.Width, $bounds.Height)
 }
 
-$coords = $null
-if ($active) {
-  $code = @"
+try {
+  $coords = $null
+  if ($active) {
+    $code = @"
 using System;
 using System.Runtime.InteropServices;
 public struct EXNORECT { public int Left; public int Top; public int Right; public int Bottom; }
@@ -185,32 +215,42 @@ public class EXNOWIN32 {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out EXNORECT rect);
 }
 "@
-  Add-Type $code -ErrorAction SilentlyContinue | Out-Null
-  $rect = New-Object EXNORECT
-  $hwnd = [EXNOWIN32]::GetForegroundWindow()
-  [EXNOWIN32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
-  $w = $rect.Right - $rect.Left
-  $h = $rect.Bottom - $rect.Top
-  if ($w -gt 0 -and $h -gt 0) {
-    $coords = @($rect.Left, $rect.Top, $w, $h)
+    Add-Type $code -ErrorAction SilentlyContinue | Out-Null
+    $rect = New-Object EXNORECT
+    $hwnd = [EXNOWIN32]::GetForegroundWindow()
+    [EXNOWIN32]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    $w = $rect.Right - $rect.Left
+    $h = $rect.Bottom - $rect.Top
+    if ($w -gt 0 -and $h -gt 0) {
+      $coords = @($rect.Left, $rect.Top, $w, $h)
+    }
   }
-}
-if ($null -eq $coords) { $coords = Use-VirtualScreen }
+  if ($null -eq $coords) { $coords = Use-VirtualScreen }
 
-$x = [int]$coords[0]
-$y = [int]$coords[1]
-$w = [int]$coords[2]
-$h = [int]$coords[3]
-$dir = [System.IO.Path]::GetDirectoryName($out)
-if ($dir) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }
-$bitmap = New-Object System.Drawing.Bitmap $w, $h
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($x, $y, 0, 0, $bitmap.Size)
-$bitmap.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bitmap.Dispose()
-(@{ok=$true; backend="windows"; output=$out; width=$w; height=$h; active_window=$active} | ConvertTo-Json -Compress)
+  $x = [int]$coords[0]
+  $y = [int]$coords[1]
+  $w = [int]$coords[2]
+  $h = [int]$coords[3]
+  $dir = [System.IO.Path]::GetDirectoryName($out)
+  if ($dir) { [System.IO.Directory]::CreateDirectory($dir) | Out-Null }
+  $bitmap = New-Object System.Drawing.Bitmap $w, $h
+  $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+  $graphics.CopyFromScreen($x, $y, 0, 0, $bitmap.Size)
+  $bitmap.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+  $graphics.Dispose()
+  $bitmap.Dispose()
+  (@{ok=$true; backend="windows"; output=$out; width=$w; height=$h; active_window=$active} | ConvertTo-Json -Compress)
+  exit 0
+} catch {
+  (@{ok=$false; backend="windows"; output=$out; error=$_.Exception.Message} | ConvertTo-Json -Compress)
+  exit 1
+}
 '''
+    return (
+        script.replace("__OUTPUT_PATH__", _powershell_string(output_path))
+        .replace("__DELAY_MS__", str(delay_ms))
+        .replace("__ACTIVE_WINDOW__", active_literal)
+    )
 
 
 def _linux_screenshot_shell() -> str:
@@ -241,15 +281,14 @@ def _desktop_screenshot_command(output_path: Path, mode: str, active_window: boo
 
     delay_ms = max(0, int(float(delay_seconds) * 1000))
     linux_capture = _linux_screenshot_shell()
-    encoded_ps = base64.b64encode(_powershell_screenshot_script().encode("utf-16le")).decode("ascii")
+    output = quote(output_path)
+    output_win = _wsl_windows_path(output_path)
+    encoded_ps = base64.b64encode(
+        _powershell_screenshot_script(output_win, active_window, delay_ms).encode("utf-16le")
+    ).decode("ascii")
     windows_capture = (
-        'OUT_WIN=$(wslpath -w "$OUT") && '
-        'EXNOKALIMCP_SCREENSHOT_OUT="$OUT_WIN" '
-        f"EXNOKALIMCP_SCREENSHOT_DELAY_MS={delay_ms} "
-        f"EXNOKALIMCP_SCREENSHOT_ACTIVE={quote(str(active_window).lower())} "
         f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {quote(encoded_ps)}"
     )
-    output = quote(output_path)
     if mode == "linux":
         return f"OUT={output}; export OUT; {linux_capture}"
     if mode == "windows":
@@ -882,12 +921,19 @@ def register(mcp: Any, services: Any) -> None:
             return {"ok": True, "tool": info, "installed": info["installed"], "installed_now": False}
         if not confirm_authorized:
             raise PermissionError("install_if_missing requires confirm_authorized=True")
-        command = services.tool_resolver.install_command(tool_name, method)
+        plan = services.tool_resolver.install_plan(tool_name, method)
+        command = plan.get("command", "")
         if not command:
-            raise ValueError(f"No install command is known for {tool_name!r} with method {method!r}")
+            return {
+                "ok": False,
+                "status": "no_install_command",
+                "tool": info,
+                "install_plan": plan,
+                "resolver": services.tool_resolver.resolve(tool_name),
+            }
         result = await services.run_command_tool(
             "install_tool",
-            command,
+            str(command),
             locals(),
             workspace=workspace,
             timeout=timeout,
@@ -896,6 +942,7 @@ def register(mcp: Any, services: Any) -> None:
         )
         result["tool"] = services.tool_resolver.check(tool_name)
         result["installed_now"] = result["tool"]["installed"]
+        result["install_plan"] = plan
         return result
 
     @mcp.tool()
@@ -930,12 +977,18 @@ def register(mcp: Any, services: Any) -> None:
         method = method.lower()
         if method not in {"auto", "apt", "pipx", "pip", "go"}:
             raise ValueError("method must be auto, apt, pipx, pip, or go")
-        command = services.tool_resolver.install_command(tool_name, method)
+        plan = services.tool_resolver.install_plan(tool_name, method)
+        command = plan.get("command", "")
         if not command:
-            raise ValueError(f"No install command is known for {tool_name!r} with method {method!r}")
+            return {
+                "ok": False,
+                "status": "no_install_command",
+                "install_plan": plan,
+                "resolver": services.tool_resolver.resolve(tool_name),
+            }
         result = await services.run_command_tool(
             "install_tool",
-            command,
+            str(command),
             locals(),
             workspace=workspace,
             timeout=timeout,
@@ -944,6 +997,7 @@ def register(mcp: Any, services: Any) -> None:
         )
         result["tool"] = services.tool_resolver.check(tool_name)
         result["resolver"] = services.tool_resolver.resolve(tool_name)
+        result["install_plan"] = plan
         return result
 
     @mcp.tool()
@@ -1243,7 +1297,7 @@ def register(mcp: Any, services: Any) -> None:
         installed = {tool: bool(shutil.which(tool)) for tool in core_tools}
         return {
             "ok": True,
-            "server": services.config.get("server", {}),
+            "server": _redacted_server_config(services.config),
             "paths": {
                 "workspace_dir": str(services.sessions.workspace_dir),
                 "scope_file": str(services.sessions.scope_file),
@@ -1540,11 +1594,13 @@ def register(mcp: Any, services: Any) -> None:
             check_binary=False,
         )
         exists = output_path.exists()
+        size = output_path.stat().st_size if exists else 0
+        result["ok"] = bool(result.get("ok")) and exists and size > 0
         result.update(
             {
                 "screenshot_path": str(output_path),
                 "screenshot_exists": exists,
-                "screenshot_size": output_path.stat().st_size if exists else 0,
+                "screenshot_size": size,
                 "dimensions": _png_dimensions(output_path) if exists else {"width": 0, "height": 0},
                 "capture_mode": mode,
                 "active_window": active_window,
@@ -1569,7 +1625,26 @@ def register(mcp: Any, services: Any) -> None:
         """Take a screenshot of an authorized web page using gowitness."""
 
         output_dir = output or str(services.sessions.workspace_path(workspace) / "screenshots")
-        command = join_flags(["gowitness", "scan", "single", "--url", quote(url), "--screenshot-path", quote(output_dir)])
+        effective_timeout, capped = services._foreground_timeout(timeout)
+        gowitness_timeout = max(5, min(int(timeout), int(effective_timeout)) - 5)
+        command = join_flags(
+            [
+                "gowitness",
+                "scan",
+                "single",
+                "--url",
+                quote(url),
+                "--screenshot-path",
+                quote(output_dir),
+                "--screenshot-format",
+                "png",
+                "--write-none",
+                "--threads",
+                "1",
+                "--timeout",
+                str(gowitness_timeout),
+            ]
+        )
         result = await services.run_command_tool(
             "screenshot_web",
             command,
@@ -1579,6 +1654,8 @@ def register(mcp: Any, services: Any) -> None:
             timeout=timeout,
         )
         result["screenshot_dir"] = output_dir
+        result["gowitness_timeout"] = gowitness_timeout
+        result["foreground_timeout_capped"] = capped or result.get("foreground_timeout_capped", False)
         return result
 
     @mcp.tool()

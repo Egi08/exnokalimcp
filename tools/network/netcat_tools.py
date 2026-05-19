@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,27 @@ from tools import join_flags, option_string, parse_headers, quote
 
 def _headers(headers: dict[str, str] | str | None) -> str:
     return " ".join(f"-H {quote(header)}" for header in parse_headers(headers))
+
+
+def _curl_options(options: str, timeout: int) -> str:
+    tokens = shlex.split(options or "")
+    has_max_time = any(
+        token in {"-m", "--max-time"}
+        or token.startswith("--max-time=")
+        or token.startswith("-m=")
+        or (token.startswith("-m") and len(token) > 2 and token[2].isdigit())
+        for token in tokens
+    )
+    has_connect_timeout = any(
+        token == "--connect-timeout" or token.startswith("--connect-timeout=") for token in tokens
+    )
+    effective_timeout = max(1, int(timeout))
+    additions = []
+    if not has_connect_timeout:
+        additions.extend(["--connect-timeout", str(min(10, effective_timeout))])
+    if not has_max_time:
+        additions.extend(["--max-time", str(effective_timeout)])
+    return join_flags([option_string(options), " ".join(additions)])
 
 
 def register(mcp: Any, services: Any) -> None:
@@ -198,13 +220,14 @@ def register(mcp: Any, services: Any) -> None:
         data: str = "",
         options: str = "-i -sS",
         workspace: str = "default",
-        timeout: int = 300,
+        timeout: int = 25,
     ) -> dict[str, Any]:
-        """Send an HTTP request to an authorized URL using curl."""
+        """Send an HTTP request to an authorized URL using curl with bounded network timeouts."""
 
         data_arg = f"--data-raw {quote(data)}" if data else ""
+        curl_options = _curl_options(options, timeout)
         command = join_flags(
-            ["curl", "-X", quote(method.upper()), _headers(headers), data_arg, option_string(options), quote(url)]
+            ["curl", "-X", quote(method.upper()), _headers(headers), data_arg, curl_options, quote(url)]
         )
         return await services.run_command_tool(
             "curl_request",
@@ -212,7 +235,7 @@ def register(mcp: Any, services: Any) -> None:
             locals(),
             target=url,
             workspace=workspace,
-            timeout=timeout,
+            timeout=timeout + 5,
         )
 
     @mcp.tool()

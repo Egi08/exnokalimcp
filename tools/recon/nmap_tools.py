@@ -9,6 +9,7 @@ from typing import Any
 from mcp.server.fastmcp import Context
 
 from tools import csv, join_flags, option_string, quote
+from tools.session_manager import normalize_host
 
 
 def _parse_nmap_xml(path: Path) -> dict[str, Any]:
@@ -67,6 +68,9 @@ def register(mcp: Any, services: Any) -> None:
         scan_type may be default, stealth, tcp, udp, ping, aggressive, or vuln.
         """
 
+        nmap_target = normalize_host(target)
+        if not nmap_target:
+            raise ValueError("target must include a hostname, IP, CIDR, or URL with a hostname")
         xml_path = services.sessions.output_path(workspace, "nmap_scan", ".xml")
         scan_map = {
             "default": services.config.get("tools", {}).get("nmap", {}).get("default_args", "-sV -sC"),
@@ -87,10 +91,10 @@ def register(mcp: Any, services: Any) -> None:
                 option_string(options),
                 "-oX",
                 quote(xml_path),
-                quote(target),
+                quote(nmap_target),
             ]
         )
-        return await services.run_command_tool(
+        result = await services.run_command_tool(
             "nmap_scan",
             command,
             locals(),
@@ -100,6 +104,10 @@ def register(mcp: Any, services: Any) -> None:
             parser=lambda _: _parse_nmap_xml(xml_path),
             ctx=ctx,
         )
+        result["normalized_target"] = nmap_target
+        if "Unable to split netmask from target expression" in result.get("output_preview", ""):
+            result["ok"] = False
+        return result
 
     @mcp.tool()
     async def nmap_vuln_scan(
@@ -111,10 +119,13 @@ def register(mcp: Any, services: Any) -> None:
     ) -> dict[str, Any]:
         """Run nmap service/version detection with the vuln NSE script category."""
 
+        nmap_target = normalize_host(target)
+        if not nmap_target:
+            raise ValueError("target must include a hostname, IP, CIDR, or URL with a hostname")
         xml_path = services.sessions.output_path(workspace, "nmap_vuln_scan", ".xml")
         port_args = f"-p {quote(ports)}" if ports else ""
-        command = join_flags(["nmap", "-sV", "--script", "vuln", port_args, "-oX", quote(xml_path), quote(target)])
-        return await services.run_command_tool(
+        command = join_flags(["nmap", "-sV", "--script", "vuln", port_args, "-oX", quote(xml_path), quote(nmap_target)])
+        result = await services.run_command_tool(
             "nmap_vuln_scan",
             command,
             locals(),
@@ -124,6 +135,10 @@ def register(mcp: Any, services: Any) -> None:
             parser=lambda _: _parse_nmap_xml(xml_path),
             ctx=ctx,
         )
+        result["normalized_target"] = nmap_target
+        if "Unable to split netmask from target expression" in result.get("output_preview", ""):
+            result["ok"] = False
+        return result
 
     @mcp.tool()
     async def masscan(

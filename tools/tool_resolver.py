@@ -71,7 +71,12 @@ DEFAULT_TOOL_SPECS: dict[str, ToolSpec] = {
     "corscanner": ToolSpec("corscanner", "web", pipx="corscanner"),
     "testssl.sh": ToolSpec("testssl.sh", "web", apt="testssl.sh", aliases=("testssl",)),
     "wafw00f": ToolSpec("wafw00f", "web", apt="wafw00f"),
-    "gowitness": ToolSpec("gowitness", "web", go="github.com/sensepost/gowitness@latest"),
+    "gowitness": ToolSpec(
+        "gowitness",
+        "web",
+        go="github.com/sensepost/gowitness@3.0.5",
+        notes="Pinned because newer gowitness releases require newer Go toolchains than many Kali WSL installs ship.",
+    ),
     "searchsploit": ToolSpec("searchsploit", "exploit", apt="exploitdb"),
     "msfconsole": ToolSpec("msfconsole", "exploit", apt="metasploit-framework"),
     "msfvenom": ToolSpec("msfvenom", "exploit", apt="metasploit-framework"),
@@ -263,14 +268,39 @@ class ToolResolver:
     def install_command(self, tool_name: str, method: str = "auto", update_apt: bool = True) -> str:
         """Build a single install command for a tool and method."""
 
+        plan = self.install_plan(tool_name, method=method, update_apt=update_apt)
+        return str(plan.get("command", ""))
+
+    def install_plan(self, tool_name: str, method: str = "auto", update_apt: bool = True) -> dict[str, Any]:
+        """Build an install command plus metadata, falling back when a method is unavailable."""
+
         method = (method or "auto").lower()
+        requested_method = method
         if method == "auto":
             method = self._recommended_method(tool_name)
         commands = self.install_commands(tool_name)
         command = commands.get(method, "")
+        method_fallback = False
+        fallback_reason = ""
+        if not command and requested_method != "auto":
+            fallback = self._recommended_method(tool_name)
+            command = commands.get(fallback, "")
+            if command:
+                fallback_reason = f"method {requested_method!r} is not available for {self._canonical(tool_name)!r}"
+                method = fallback
+                method_fallback = True
         if method == "apt" and command and update_apt:
-            return f"sudo apt-get update && {command}"
-        return command
+            command = f"sudo apt-get update && {command}"
+        return {
+            "tool": tool_name,
+            "binary": self._canonical(tool_name),
+            "requested_method": requested_method,
+            "effective_method": method,
+            "method_fallback": method_fallback,
+            "fallback_reason": fallback_reason,
+            "command": command,
+            "available_methods": sorted(commands),
+        }
 
     def inventory(self, category: str = "", only_missing: bool = False) -> list[dict[str, Any]]:
         """Return installed/missing state for all known tools."""
@@ -385,11 +415,11 @@ class ToolResolver:
 
     def _recommended_method(self, tool_name: str) -> str:
         configured = self.default_method
-        if configured != "auto":
-            return configured
         spec = self.specs.get(self._canonical(tool_name))
         if not spec:
             return "apt"
+        if configured != "auto" and getattr(spec, configured, None):
+            return configured
         for method in ("apt", "go", "pipx", "pip"):
             if getattr(spec, method):
                 return method
@@ -408,7 +438,7 @@ class ToolResolver:
             except Exception:
                 continue
             output = (proc.stdout or proc.stderr).strip()
-            if output:
+            if output and proc.returncode == 0:
                 return output.splitlines()[0][:300]
         return ""
 

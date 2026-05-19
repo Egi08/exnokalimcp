@@ -110,12 +110,16 @@ class ExnoKaliMCPServices:
         if not auth.get("enabled", True):
             return
         configured = {str(key) for key in auth.get("api_keys", []) if str(key)}
-        supplied = (
-            os.environ.get("EXNOKALIMCP_AUTH_KEY")
-            or os.environ.get("KALI_MCP_AUTH_KEY", "")
-            or self._auth_key_from_file()
-        )
-        if configured and supplied not in configured:
+        supplied = {
+            key
+            for key in (
+                os.environ.get("EXNOKALIMCP_AUTH_KEY"),
+                os.environ.get("KALI_MCP_AUTH_KEY"),
+                self._auth_key_from_file(),
+            )
+            if key
+        }
+        if configured and configured.isdisjoint(supplied):
             raise PermissionError(
                 "EXNOKALIMCP_AUTH_KEY is missing or invalid. Set it to an api_keys entry in config.yaml."
             )
@@ -268,7 +272,8 @@ class ExnoKaliMCPServices:
         """Check policy, run a command, persist output, and return JSON."""
 
         started = time.monotonic()
-        timeout = timeout or int(self.config.get("tools", {}).get("default_timeout", 3600))
+        requested_timeout = timeout or int(self.config.get("tools", {}).get("default_timeout", 3600))
+        timeout, foreground_timeout_capped = self._foreground_timeout(requested_timeout)
         self.ensure_allowed(tool, params, target=target, confirm_authorized=confirm_authorized)
         self.ensure_command_policy(tool, command, confirm_authorized=confirm_authorized)
         missing = self._missing_tool(command) if check_binary else None
@@ -321,6 +326,9 @@ class ExnoKaliMCPServices:
             "line_count": len(command_result.output.splitlines()),
             "duration_seconds": command_result.duration_seconds,
             "timed_out": command_result.timed_out,
+            "requested_timeout": requested_timeout,
+            "effective_timeout": timeout,
+            "foreground_timeout_capped": foreground_timeout_capped,
         }
         result_id = self.store.add_result(
             workspace=workspace,
@@ -338,7 +346,7 @@ class ExnoKaliMCPServices:
             status="completed",
             message=f"result_id={result_id} exit_code={command_result.exit_code}",
         )
-        return {
+        response = {
             "ok": command_result.exit_code == 0 and not command_result.timed_out,
             "tool": tool,
             "result_id": result_id,
@@ -347,12 +355,31 @@ class ExnoKaliMCPServices:
             "command": command,
             "exit_code": command_result.exit_code,
             "timed_out": command_result.timed_out,
+            "requested_timeout": requested_timeout,
+            "effective_timeout": timeout,
+            "foreground_timeout_capped": foreground_timeout_capped,
             "duration_seconds": round(time.monotonic() - started, 3),
             "output_path": str(output_path),
             "output_preview": command_result.output[:max_chars],
             "summary": summary,
             "disclaimer": DISCLAIMER,
         }
+        if command_result.timed_out and foreground_timeout_capped:
+            response["timeout_hint"] = (
+                f"Foreground MCP call stopped after {timeout}s to avoid desktop client timeout. "
+                "For long scans, run the same command with start_background_process and poll it with "
+                "list_background_processes/read_background_process_output."
+            )
+            response["background_example"] = {
+                "tool": "start_background_process",
+                "arguments": {
+                    "command": command,
+                    "target": target or "",
+                    "workspace": workspace,
+                    "confirm_authorized": True,
+                },
+            }
+        return response
 
     async def start_background_tool(
         self,
@@ -477,6 +504,15 @@ class ExnoKaliMCPServices:
             wait = round(seconds - (now - previous), 2)
             raise PermissionError(f"Rate limit active for {tool} against {target}; wait {wait}s.")
         self._last_call[key] = now
+
+    def _foreground_timeout(self, requested_timeout: int) -> tuple[int, bool]:
+        """Cap foreground calls so MCP clients get a structured response before their own timeout."""
+
+        requested = max(1, int(requested_timeout))
+        cap = int(self.config.get("tools", {}).get("foreground_timeout", 25))
+        if cap <= 0 or requested <= cap:
+            return requested, False
+        return max(1, cap), True
 
     def _sanitize_params(self, params: dict[str, Any]) -> dict[str, Any]:
         redacted = {}

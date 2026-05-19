@@ -145,7 +145,7 @@ GO_TOOLS=(
   "github.com/lc/gau/v2/cmd/gau@latest"
   "github.com/tomnomnom/waybackurls@latest"
   "github.com/hahwul/dalfox/v2@latest"
-  "github.com/sensepost/gowitness@latest"
+  "github.com/sensepost/gowitness@3.0.5"
 )
 if [[ "${SKIP_GO}" -eq 0 ]]; then
   log "Installing Go-based recon tools"
@@ -198,14 +198,28 @@ AUTH_KEY="$(cat "${KEY_FILE}")"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   cp "${PROJECT_DIR}/config.yaml" "${CONFIG_PATH}"
 fi
-python3 - "${CONFIG_PATH}" "${AUTH_KEY}" <<'PY'
+"${VENV_DIR}/bin/python" - "${CONFIG_PATH}" "${AUTH_KEY}" "${KEY_FILE}" <<'PY'
 from pathlib import Path
 import sys
+import yaml
+
 path = Path(sys.argv[1])
 key = sys.argv[2]
-text = path.read_text()
-text = text.replace("change-me-exnokalimcp-key", key)
-path.write_text(text)
+key_file = sys.argv[3]
+config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+server = config.setdefault("server", {})
+auth = server.setdefault("auth", {})
+auth["enabled"] = auth.get("enabled", True)
+auth["key_file"] = key_file
+keys = [
+    str(item)
+    for item in auth.get("api_keys", [])
+    if str(item) and str(item) != "change-me-exnokalimcp-key"
+]
+auth["api_keys"] = [key] + [item for item in keys if item != key]
+tools = config.setdefault("tools", {})
+tools["foreground_timeout"] = int(tools.get("foreground_timeout", 25))
+path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 PY
 
 log "Initializing SQLite database"
@@ -275,7 +289,7 @@ Claude JSON:   ${CLAUDE_SNIPPET}
 
 Manual stdio test:
   cd "${PROJECT_DIR}"
-  EXNOKALIMCP_CONFIG="${CONFIG_PATH}" EXNOKALIMCP_AUTH_KEY="${AUTH_KEY}" "${VENV_DIR}/bin/python" server.py
+  EXNOKALIMCP_CONFIG="${CONFIG_PATH}" EXNOKALIMCP_AUTH_KEY="\$(cat "${KEY_FILE}")" "${VENV_DIR}/bin/python" server.py
 
 For Claude Desktop on Windows, merge this snippet into claude_desktop_config.json:
   ${CLAUDE_SNIPPET}

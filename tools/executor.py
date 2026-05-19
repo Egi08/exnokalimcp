@@ -6,6 +6,7 @@ import asyncio
 import os
 import shlex
 import signal
+import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -386,15 +387,54 @@ def get_running_processes() -> list[dict[str, Any]]:
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    if os.name == "nt":
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill",
+                "/PID",
+                str(process.pid),
+                "/T",
+                "/F",
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=5)
+        except (FileNotFoundError, ProcessLookupError, asyncio.TimeoutError):
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
+            await process.wait()
+        return
+
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
+    except (AttributeError, ProcessLookupError):
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
+        return
     except asyncio.TimeoutError:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except AttributeError:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            process.kill()
         except ProcessLookupError:
-            pass
-        await process.wait()
+            return
+    except ProcessLookupError:
+        return
+    await process.wait()

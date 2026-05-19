@@ -31,3 +31,45 @@ def test_resolver_suggests_task_tools() -> None:
     names = {item["binary"] for item in result["recommendations"]}
 
     assert {"ffuf", "gobuster"} <= names
+
+
+def test_install_plan_falls_back_when_requested_method_is_unavailable() -> None:
+    resolver = ToolResolver({"tool_resolver": {}})
+
+    plan = resolver.install_plan("gowitness", method="apt")
+
+    assert plan["requested_method"] == "apt"
+    assert plan["effective_method"] == "go"
+    assert plan["method_fallback"] is True
+    assert "go install" in plan["command"]
+    assert "github.com/sensepost/gowitness@3.0.5" in plan["command"]
+
+
+def test_configured_install_method_falls_back_for_tool_without_that_method() -> None:
+    resolver = ToolResolver({"tool_resolver": {"install_method": "apt"}})
+
+    assert resolver.resolve("gowitness")["recommended_method"] == "go"
+
+
+def test_version_skips_failed_version_flags(monkeypatch) -> None:
+    class Completed:
+        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    calls: list[str] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args[1])
+        if args[1] == "--version":
+            return Completed(1, stderr="unknown flag: --version")
+        if args[1] == "version":
+            return Completed(0, stdout="gowitness 3.0.5\n")
+        return Completed(1)
+
+    monkeypatch.setattr("tools.tool_resolver.subprocess.run", fake_run)
+    resolver = ToolResolver({"tool_resolver": {}})
+
+    assert resolver._version("gowitness") == "gowitness 3.0.5"
+    assert calls[:3] == ["--version", "-version", "version"]
