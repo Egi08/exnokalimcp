@@ -312,6 +312,10 @@ wsl_path_convert(path="/mnt/c/Users/black/Downloads/payload.txt", direction="wsl
 
 Long-running jobs:
 
+Foreground MCP calls are capped by `tools.foreground_timeout` so desktop clients
+receive a structured timeout response instead of a client-side request timeout.
+Use background jobs for scans or commands that need more than that cap.
+
 ```text
 start_background_process(command="nmap -sV -p- 192.168.56.10", target="192.168.56.10", workspace="net", confirm_authorized=true)
 list_background_processes()
@@ -403,6 +407,7 @@ Important fields:
 - `paths.workspace_dir`: raw output and reports
 - `paths.results_db`: SQLite result database
 - `tools.default_timeout`: default command timeout
+- `tools.foreground_timeout`: MCP-safe cap for foreground command tools; use background jobs for longer runs
 - `tool_resolver.auto_install`: disabled by default; if enabled, missing tools install only on confirmed calls
 - `tool_resolver.extra_paths`: extra WSL PATH entries such as `~/.local/bin` and `~/go/bin`
 
